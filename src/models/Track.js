@@ -13,8 +13,16 @@ const trackSchema = new mongoose.Schema({
     type: Number,
     required: true
   },
-  fileUrl: {
+  fileName: {
     type: String,
+    required: true
+  },
+  mimeType: {
+    type: String,
+    required: true
+  },
+  fileSize: {
+    type: Number,
     required: true
   },
   coverImage: {
@@ -32,10 +40,24 @@ const trackSchema = new mongoose.Schema({
   tags: [{
     type: String
   }],
+  playCount: {
+    type: Number,
+    default: 0
+  },
   createdAt: {
     type: Date,
     default: Date.now
+  },
+  updatedAt: {
+    type: Date,
+    default: Date.now
   }
+});
+
+// Güncelleme öncesi updatedAt alanını güncelle
+trackSchema.pre('save', function(next) {
+  this.updatedAt = Date.now();
+  next();
 });
 
 module.exports = mongoose.model('Track', trackSchema);
