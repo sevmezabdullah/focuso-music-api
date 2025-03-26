@@ -1,14 +1,29 @@
 const express = require('express');
 const router = express.Router();
+const fs = require('fs');
+const path = require('path');
 const auth = require('../middleware/auth');
 const admin = require('../middleware/admin');
 const Track = require('../models/Track');
 const Playlist = require('../models/Playlist');
 const User = require('../models/User');
-const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 const fileUpload = require('express-fileupload');
+const { getAudioDurationInSeconds } = require('get-audio-duration');
 
-router.use(fileUpload());
+router.use(fileUpload({
+    limits: { 
+        fileSize: 50 * 1024 * 1024 // 50MB limit
+    },
+    abortOnLimit: true
+}));
+
+// Müzik dosyaları için temel dizin
+const MUSIC_DIR = path.join(__dirname, '../../uploads/music');
+
+// Dizinin varlığını kontrol et ve oluştur
+if (!fs.existsSync(MUSIC_DIR)) {
+    fs.mkdirSync(MUSIC_DIR, { recursive: true });
+}
 
 // Ana sayfa
 router.get('/', [auth, admin], async (req, res) => {
@@ -82,23 +97,14 @@ router.post('/tracks', [auth, admin], async (req, res) => {
         }
 
         const file = req.files.audio;
-        const fileKey = `music/${Date.now()}-${file.name}`;
+        const fileName = `${Date.now()}-${file.name}`;
+        const filePath = path.join(MUSIC_DIR, fileName);
 
-        const s3Client = new S3Client({
-            region: process.env.AWS_REGION,
-            credentials: {
-                accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-                secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
-            }
-        });
+        // Dosyayı kaydet
+        await file.mv(filePath);
 
-        // S3'e yükle
-        await s3Client.send(new PutObjectCommand({
-            Bucket: process.env.AWS_BUCKET_NAME,
-            Key: fileKey,
-            Body: file.data,
-            ContentType: file.mimetype
-        }));
+        // Müzik süresini hesapla
+        const duration = await getAudioDurationInSeconds(filePath);
 
         // Veritabanına kaydet
         const track = new Track({
@@ -106,13 +112,19 @@ router.post('/tracks', [auth, admin], async (req, res) => {
             artist: req.body.artist,
             category: req.body.category,
             isPremium: req.body.isPremium === 'on',
-            fileUrl: `https://${process.env.AWS_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${fileKey}`,
-            duration: req.body.duration || 0 // Gerçek süreyi hesaplamak için ek işlem gerekebilir
+            fileName: fileName,
+            mimeType: file.mimetype,
+            fileSize: file.size,
+            duration: Math.round(duration)
         });
 
         await track.save();
         res.status(201).json(track);
     } catch (error) {
+        // Hata durumunda dosyayı sil
+        if (filePath && fs.existsSync(filePath)) {
+            fs.unlinkSync(filePath);
+        }
         console.error('Müzik yükleme hatası:', error);
         res.status(500).json({ message: 'Sunucu hatası' });
     }
@@ -147,27 +159,19 @@ router.put('/tracks/:id', [auth, admin], async (req, res) => {
 // Müzik sil
 router.delete('/tracks/:id', [auth, admin], async (req, res) => {
     try {
-        const track = await Track.findByIdAndDelete(req.params.id);
+        const track = await Track.findById(req.params.id);
 
         if (!track) {
             return res.status(404).json({ message: 'Müzik bulunamadı' });
         }
 
-        // S3'ten dosyayı sil
-        const fileKey = track.fileUrl.split('/').pop();
-        const s3Client = new S3Client({
-            region: process.env.AWS_REGION,
-            credentials: {
-                accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-                secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
-            }
-        });
+        // Dosyayı sil
+        const filePath = path.join(MUSIC_DIR, track.fileName);
+        if (fs.existsSync(filePath)) {
+            fs.unlinkSync(filePath);
+        }
 
-        await s3Client.send(new DeleteObjectCommand({
-            Bucket: process.env.AWS_BUCKET_NAME,
-            Key: fileKey
-        }));
-
+        await track.deleteOne();
         res.json({ message: 'Müzik başarıyla silindi' });
     } catch (error) {
         res.status(500).json({ message: 'Sunucu hatası' });
